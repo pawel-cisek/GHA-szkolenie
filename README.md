@@ -1,1 +1,2 @@
 # GHA-szkolenie
+test
