@@ -1,4 +1,4 @@
-name: Pobieranie informacji o pogodzie
+name: "CW6_03"
 
 on:
   workflow_dispatch:
