@@ -1,0 +1,31 @@
+name: Pobieranie informacji o pogodzie
+
+on:
+  workflow_dispatch:
+    inputs:
+      city:
+        description: "Nazwa miasta"
+        required: true
+        default: "Warsaw"
+        type: string
+
+env:
+  MY_KLUCZYK: ${{ secrets.MY_KLUCZYK }}
+
+jobs:
+  weather:
+    name: Pobierz informacje o pogodzie
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./CWICZENIA/06-context/pogoda
+
+    steps:
+      - name: Checkout repozytorium
+        uses: actions/checkout@v3
+
+      - name: Pobierz dane pogodowe
+        run: |
+          RESULT=$(./start.sh "${{ inputs.city }}" "${{ env.MY_KLUCZYK }}")
+          echo "$RESULT" >> "$GITHUB_STEP_SUMMARY"
