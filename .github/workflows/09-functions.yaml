@@ -1,0 +1,50 @@
+name: "09 – Using Functions"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  echo1:
+    runs-on: ubuntu-latest
+    steps:
+      # KROKI ZWIĄZANE Z PR
+      - name: Print PR title
+        if: ${{ github.event_name == 'pull_request' }}
+        run: echo "PR title: ${{ github.event.pull_request.title }}"
+
+      - name: Print PR labels
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          cat << EOF
+          ${{ toJSON(github.event.pull_request.labels) }}
+          EOF
+
+      - name: Bug step
+        if: ${{ failure() && !cancelled() && contains(github.event.pull_request.title, 'fix') }}
+        run: echo "I am a bug fix"
+
+      # OPÓŹNIENIE DLA TESTU ANULOWANIA
+      - name: Sleep for 20 seconds
+        run: sleep 20
+
+      # SCENARIUSZ Z FUNKCJAMI STATUSU
+      - name: Failing step
+        run: |
+          echo "About to fail..."
+          exit 1
+
+      - name: I will be skipped
+        if: ${{ success() }}
+        run: echo "I will print if previous steps succeed."
+
+      - name: I will execute
+        if: ${{ failure() }}
+        run: echo "I will print if any previous step fails."
+
+      - name: I will execute
+        if: ${{ !cancelled() }}
+        run: echo "I will always print, except when the workflow is cancelled."
+
+      - name: I will execute when cancelled
+        if: ${{ cancelled() }}
+        run: echo "This prints only when the workflow is cancelled."
