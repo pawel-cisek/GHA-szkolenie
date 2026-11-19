@@ -1,0 +1,404 @@
+name: CW12A Weather Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_name:
+        description: "First name"
+        required: true
+        type: string
+
+      last_name:
+        description: "Last name"
+        required: true
+        type: string
+
+      deployment_target:
+        description: "Deployment target"
+        required: true
+        default: github
+        type: choice
+        options:
+          - github
+          - self-hosted
+
+      city:
+        description: "City"
+        required: true
+        default: Warsaw
+        type: string
+
+      app_port:
+        description: "Application port"
+        required: true
+        default: 18820
+        type: number
+
+jobs:
+
+  prepare:
+    runs-on: ubuntu-latest
+
+    outputs:
+      student_slug: ${{ steps.config.outputs.student_slug }}
+      image_tag: ${{ steps.config.outputs.image_tag }}
+      sha_tag: ${{ steps.config.outputs.sha_tag }}
+      container_name: ${{ steps.config.outputs.container_name }}
+      runner_labels: ${{ steps.config.outputs.runner_labels }}
+      app_port: ${{ steps.config.outputs.app_port }}
+      weather_city: ${{ steps.config.outputs.weather_city }}
+      ci_image: ${{ steps.config.outputs.ci_image }}
+      deployment_target: ${{ steps.config.outputs.deployment_target }}
+
+    steps:
+      - name: Validate inputs and prepare config
+        id: config
+        shell: bash
+        env:
+          FIRST_NAME: ${{ inputs.first_name }}
+          LAST_NAME: ${{ inputs.last_name }}
+          DEPLOYMENT_TARGET: ${{ inputs.deployment_target }}
+          CITY: ${{ inputs.city }}
+          APP_PORT: ${{ inputs.app_port }}
+        run: |
+
+          set -euo pipefail
+
+          [[ "$FIRST_NAME" =~ ^[A-Za-z]+(-[A-Za-z]+)*$ ]] || exit 1
+          [[ "$LAST_NAME" =~ ^[A-Za-z]+(-[A-Za-z]+)*$ ]] || exit 1
+
+          [[ ${#FIRST_NAME} -le 30 ]] || exit 1
+          [[ ${#LAST_NAME} -le 30 ]] || exit 1
+
+          [[ "$DEPLOYMENT_TARGET" =~ ^(github|self-hosted)$ ]] || exit 1
+
+          CITY_LENGTH=${#CITY}
+          [[ $CITY_LENGTH -ge 1 ]] || exit 1
+          [[ $CITY_LENGTH -le 100 ]] || exit 1
+
+          [[ "$APP_PORT" =~ ^[0-9]+$ ]] || exit 1
+
+          if [ "$APP_PORT" -lt 1024 ] || [ "$APP_PORT" -gt 65535 ]; then
+            exit 1
+          fi
+
+          STUDENT_SLUG=$(echo "${FIRST_NAME}-${LAST_NAME}" \
+            | tr '[:upper:]' '[:lower:]')
+
+          SHA_TAG="${GITHUB_SHA}"
+
+          IMAGE_TAG="${STUDENT_SLUG}-${GITHUB_SHA}"
+
+          CI_IMAGE="cw12a-weather:ci-${GITHUB_SHA}"
+
+          if [ "$DEPLOYMENT_TARGET" = "github" ]; then
+            RUNNER_LABELS='["ubuntu-latest"]'
+            CONTAINER_NAME="cw12a-${GITHUB_REPOSITORY_ID}-${STUDENT_SLUG}-${GITHUB_RUN_ID}"
+          else
+            RUNNER_LABELS='["self-hosted","linux"]'
+            CONTAINER_NAME="cw12a-${GITHUB_REPOSITORY_ID}-${STUDENT_SLUG}-prod"
+          fi
+
+          {
+            echo "student_slug=${STUDENT_SLUG}"
+            echo "image_tag=${IMAGE_TAG}"
+            echo "sha_tag=${SHA_TAG}"
+            echo "container_name=${CONTAINER_NAME}"
+            echo "runner_labels=${RUNNER_LABELS}"
+            echo "app_port=${APP_PORT}"
+            echo "weather_city=${CITY}"
+            echo "ci_image=${CI_IMAGE}"
+            echo "deployment_target=${DEPLOYMENT_TARGET}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    outputs:
+      image_id: ${{ steps.image.outputs.image_id }}
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build \
+            -t "${{ needs.prepare.outputs.ci_image }}" \
+            CWICZENIA/12A-Cwiczenia-pipeline-gha/pogoda_python_flusk
+
+      - name: Get image id
+        id: image
+        run: |
+          IMAGE_ID=$(
+            docker image inspect \
+            "${{ needs.prepare.outputs.ci_image }}" \
+            --format='{{ .Id }}'
+          )
+
+          echo "image_id=${IMAGE_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Save image
+        run: |
+          docker save \
+          "${{ needs.prepare.outputs.ci_image }}" \
+          -o image.tar
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cw12a-weather-image
+          path: image.tar
+          retention-days: 1
+          overwrite: true
+
+  test:
+    runs-on: ubuntu-latest
+
+    needs:
+      - prepare
+      - build
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cw12a-weather-image
+
+      - name: Load image
+        run: |
+          docker load -i image.tar
+
+      - name: Verify image id
+        run: |
+
+          LOADED_ID=$(
+            docker image inspect \
+            "${{ needs.prepare.outputs.ci_image }}" \
+            --format='{{ .Id }}'
+          )
+
+          test "$LOADED_ID" = "${{ needs.build.outputs.image_id }}"
+
+      - name: Run container
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: |
+
+          docker run -d \
+            --name cw12a-ci \
+            -e OPENWEATHER_API_KEY="$OPENWEATHER_API_KEY" \
+            -p 127.0.0.1:18080:8080 \
+            "${{ needs.prepare.outputs.ci_image }}"
+
+      - name: Wait for health
+        run: |
+
+          for i in {1..30}; do
+            curl -fsS http://127.0.0.1:18080/healthz && exit 0
+            sleep 2
+          done
+
+          exit 1
+
+      - name: Smoke Test
+        env:
+          BASE_URL: http://127.0.0.1:18080
+          TEST_CITY: ${{ needs.prepare.outputs.weather_city }}
+        run: |
+          python \
+            CWICZENIA/12A-Cwiczenia-pipeline-gha/pogoda_python_flusk/tests/smoke_test.py
+
+      - name: Show logs
+        if: failure()
+        run: docker logs cw12a-ci
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f cw12a-ci || true
+
+  publish:
+    runs-on: ubuntu-latest
+
+    needs:
+      - prepare
+      - build
+      - test
+
+    outputs:
+      image_digest: ${{ steps.release.outputs.image_digest }}
+
+    steps:
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cw12a-weather-image
+
+      - name: Load image
+        run: |
+          docker load -i image.tar
+
+      - name: Verify image id
+        run: |
+
+          IMAGE_ID=$(
+            docker image inspect \
+            "${{ needs.prepare.outputs.ci_image }}" \
+            --format='{{ .Id }}'
+          )
+
+          test "$IMAGE_ID" = "${{ needs.build.outputs.image_id }}"
+
+      - name: Docker login
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" |
+          docker login \
+            -u "${{ vars.DOCKERHUB_USERNAME }}" \
+            --password-stdin
+
+      - name: Publish image
+        id: release
+        run: |
+
+          IMAGE_BASE="${{ vars.DOCKERHUB_USERNAME }}/${{ vars.DOCKER_IMAGE_NAME }}"
+
+          docker tag \
+            "${{ needs.prepare.outputs.ci_image }}" \
+            "${IMAGE_BASE}:${{ needs.prepare.outputs.image_tag }}"
+
+          docker tag \
+            "${{ needs.prepare.outputs.ci_image }}" \
+            "${IMAGE_BASE}:${{ needs.prepare.outputs.sha_tag }}"
+
+          docker push "${IMAGE_BASE}:${{ needs.prepare.outputs.image_tag }}"
+          docker push "${IMAGE_BASE}:${{ needs.prepare.outputs.sha_tag }}"
+
+          DIGEST=$(
+            docker image inspect \
+            "${IMAGE_BASE}:${{ needs.prepare.outputs.image_tag }}" \
+            --format='{{index .RepoDigests 0}}'
+          )
+
+          DIGEST="${DIGEST#*@}"
+
+          echo "image_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+
+    needs:
+      - prepare
+      - publish
+
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runner_labels) }}
+
+    concurrency:
+      group: ${{ needs.prepare.outputs.container_name }}
+      cancel-in-progress: false
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - name: Prepare docker config
+        run: |
+          mkdir docker-config
+          echo "DOCKER_CONFIG=$PWD/docker-config" >> $GITHUB_ENV
+
+      - name: Docker login
+        env:
+          DOCKER_CONFIG: ${{ env.DOCKER_CONFIG }}
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" |
+          docker login \
+          -u "${{ vars.DOCKERHUB_USERNAME }}" \
+          --password-stdin
+
+      - name: Pull image by digest
+        run: |
+
+          IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${{ vars.DOCKER_IMAGE_NAME }}@${{ needs.publish.outputs.image_digest }}"
+
+          docker pull "$IMAGE_REF"
+
+      - name: Remove old container
+        run: |
+
+          if docker ps -a --format '{{.Names}}' |
+            grep -Fxq "${{ needs.prepare.outputs.container_name }}"
+          then
+            docker rm -f "${{ needs.prepare.outputs.container_name }}"
+          fi
+
+      - name: Deploy github
+        if: needs.prepare.outputs.deployment_target == 'github'
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: |
+
+          docker run -d \
+            --name "${{ needs.prepare.outputs.container_name }}" \
+            -e OPENWEATHER_API_KEY="$OPENWEATHER_API_KEY" \
+            -p 127.0.0.1:${{ needs.prepare.outputs.app_port }}:8080 \
+            "${{ vars.DOCKERHUB_USERNAME }}/${{ vars.DOCKER_IMAGE_NAME }}@${{ needs.publish.outputs.image_digest }}"
+
+      - name: Deploy self-hosted
+        if: needs.prepare.outputs.deployment_target == 'self-hosted'
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: |
+
+          docker run -d \
+            --restart unless-stopped \
+            --name "${{ needs.prepare.outputs.container_name }}" \
+            -e OPENWEATHER_API_KEY="$OPENWEATHER_API_KEY" \
+            -p ${{ needs.prepare.outputs.app_port }}:8080 \
+            "${{ vars.DOCKERHUB_USERNAME }}/${{ vars.DOCKER_IMAGE_NAME }}@${{ needs.publish.outputs.image_digest }}"
+
+      - name: Verify deployment
+        id: ready
+        run: |
+
+          BASE_URL="http://127.0.0.1:${{ needs.prepare.outputs.app_port }}"
+
+          for i in {1..30}; do
+            curl -fsS "${BASE_URL}/healthz" && break
+            sleep 2
+          done
+
+          echo "base_url=${BASE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test deployed app
+        env:
+          BASE_URL: ${{ steps.ready.outputs.base_url }}
+          TEST_CITY: ${{ needs.prepare.outputs.weather_city }}
+        run: |
+          python \
+            CWICZENIA/12A-Cwiczenia-pipeline-gha/pogoda_python_flusk/tests/smoke_test.py
+
+      - name: Summary
+        run: |
+
+          {
+            echo "# Deploy Summary"
+            echo ""
+            echo "- Student: ${{ needs.prepare.outputs.student_slug }}"
+            echo "- Container: ${{ needs.prepare.outputs.container_name }}"
+            echo "- City: ${{ needs.prepare.outputs.weather_city }}"
+            echo "- URL: ${{ steps.ready.outputs.base_url }}"
+            echo "- Digest: ${{ needs.publish.outputs.image_digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup github deployment
+        if: always() && needs.prepare.outputs.deployment_target == 'github'
+        run: |
+          docker rm -f "${{ needs.prepare.outputs.container_name }}" || true
+
+      - name: Logout docker
+        if: always()
+        run: |
+          docker logout || true
+          rm -rf "$DOCKER_CONFIG" || true
