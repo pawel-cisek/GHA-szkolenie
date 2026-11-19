@@ -1,13 +1,6 @@
 name: 08-04 Pogoda API — Variables
 
 on:
-  push:
-    branches:
-      - main
-      - feature/06-pogoda-api
-  pull_request:
-    branches:
-      - feature/06-pogoda-api
   workflow_dispatch:
 
 env:

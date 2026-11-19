@@ -1,0 +1,36 @@
+name: 13-01 Build Docker image with cache 01
+
+on:
+  push:
+    branches:
+      - cw13
+
+  pull_request:
+
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+    working-directory: ./CWICZENIA/13-caching/docker01
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (with cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./CWICZENIA/13-caching/docker01
+          file: ./CWICZENIA/13-caching/docker01/Dockerfile
+          push: false
+          tags: example-nginx:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
